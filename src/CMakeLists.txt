@@ -190,7 +190,14 @@ if(NOT USE_SYSTEM_NCNN)
     option(WITH_LAYER_swish "" OFF)
     option(WITH_LAYER_gemm "" OFF)
     option(WITH_LAYER_groupnorm "" OFF)
-    option(WITH_LAYER_layernorm "" OFF)
+    # NOTE: Recent ncnn builds compile the RMSNorm Vulkan layer by default and
+    # it reuses LayerNorm reduction shaders. If LayerNorm is disabled,
+    # `LayerShaderType::layernorm_*` entries will not be generated and the
+    # build fails in `rmsnorm_vulkan.cpp`.
+    #
+    # Use CACHE FORCE so existing build directories pick up the fix without
+    # requiring users to delete `build/`.
+    set(WITH_LAYER_layernorm ON CACHE BOOL "build with layer layernorm" FORCE)
     option(WITH_LAYER_softplus "" OFF)
     option(WITH_LAYER_gru "" OFF)
     option(WITH_LAYER_multiheadattention "" OFF)
@@ -273,7 +280,18 @@ add_executable(rife-ncnn-vulkan
 
 add_dependencies(rife-ncnn-vulkan generate-spirv)
 
-set(RIFE_LINK_LIBRARIES ncnn webp ${Vulkan_LIBRARY})
+# Some distros expose the loader as /usr/lib/x86_64-linux-gnu/libvulkan.so
+# without a /lib/libvulkan.so symlink. When FindVulkan caches a non-existent
+# path, make will fail with "No rule to make target '/lib/libvulkan.so'".
+# Find the loader library ourselves (fresh variable) to ensure it exists.
+find_library(RIFE_VULKAN_LOADER_LIBRARY NAMES vulkan)
+if(RIFE_VULKAN_LOADER_LIBRARY)
+    set(RIFE_LINK_LIBRARIES ncnn webp ${RIFE_VULKAN_LOADER_LIBRARY})
+elseif(TARGET Vulkan::Vulkan)
+    set(RIFE_LINK_LIBRARIES ncnn webp Vulkan::Vulkan)
+else()
+    set(RIFE_LINK_LIBRARIES ncnn webp vulkan)
+endif()
 
 if(USE_STATIC_MOLTENVK)
     find_library(CoreFoundation NAMES CoreFoundation)
