@@ -88,7 +88,9 @@ jobs:
           # upstream release.yml lines 93-94
           sed -i'' -e '/.size __kmp_unnamed_critical_addr/d' openmp-11.0.0.src/runtime/src/z_Linux_asm.S
           sed -i'' -e 's/__kmp_unnamed_critical_addr/___kmp_unnamed_critical_addr/g' openmp-11.0.0.src/runtime/src/z_Linux_asm.S
-          cmake -S openmp-11.0.0.src -B omp-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/omp" \
+          # CMake 4 dropped compatibility with cmake_minimum_required < 3.5 (OpenMP 11 says 2.8; ncnn and glslang say
+          # 2.8.12): the policy floor keeps their unchanged sources configuring.
+          cmake -S openmp-11.0.0.src -B omp-build -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/omp" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 -DLIBOMP_ENABLE_SHARED=OFF -DLIBOMP_OMPT_SUPPORT=OFF -DLIBOMP_USE_HWLOC=OFF
           cmake --build omp-build -j "$(sysctl -n hw.ncpu)"
           cmake --build omp-build --target install
@@ -98,13 +100,13 @@ jobs:
         run: |
           set -euo pipefail
           OMP="$PWD/omp"; SDK="$PWD/vulkansdk"
-          CMAKE_LINE="cmake -S src -B build-arm64 -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+          CMAKE_LINE="cmake -S src -B build-arm64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DOpenMP_C_FLAGS=\"-Xclang -fopenmp -I$OMP/include\" -DOpenMP_CXX_FLAGS=\"-Xclang -fopenmp -I$OMP/include\" \
             -DOpenMP_C_LIB_NAMES=libomp -DOpenMP_CXX_LIB_NAMES=libomp -DOpenMP_libomp_LIBRARY=$OMP/lib/libomp.a \
             -DVulkan_INCLUDE_DIR=$SDK/MoltenVK/include \
             -DVulkan_LIBRARY=$SDK/MoltenVK/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a"
           printf '%s\n' "$CMAKE_LINE" > cmake-line.txt
-          cmake -S src -B build-arm64 -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+          cmake -S src -B build-arm64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DOpenMP_C_FLAGS="-Xclang -fopenmp -I$OMP/include" -DOpenMP_CXX_FLAGS="-Xclang -fopenmp -I$OMP/include" \
             -DOpenMP_C_LIB_NAMES=libomp -DOpenMP_CXX_LIB_NAMES=libomp -DOpenMP_libomp_LIBRARY="$OMP/lib/libomp.a" \
             -DVulkan_INCLUDE_DIR="$SDK/MoltenVK/include" \
