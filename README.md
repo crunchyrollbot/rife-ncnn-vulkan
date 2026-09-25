@@ -1,5 +1,14 @@
 # RIFE ncnn Vulkan
 
+## Serve mode (this fork)
+
+`rife-ncnn-vulkan -S -m <model> -g <gpu> -j 1:1:1` keeps one process alive and reads jobs from stdin:
+`JOB<TAB>t<TAB>in0<TAB>in1<TAB>out` per line (`out` may end in `.ppm`, written as binary P6), answers
+`done<TAB>out` after the file is closed, exits 0 on `QUIT` or EOF and 1 with a reason on stderr on any failure.
+The single-shot and directory modes are unchanged. The serve-mode patch (`src/main.cpp`) is
+Copyright (c) 2026 crunchyrollbot and released under the same MIT License as the rest of this repository;
+`LICENSE` is unchanged.
+
 # Guide to convert your own models:
 
 https://github.com/TNTwise/REAL-Video-Enhancer/wiki/Convert-Rife-Models-to-NCNN-format

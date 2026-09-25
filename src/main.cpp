@@ -1,6 +1,11 @@
 // rife implemented with ncnn library
 
+// Serve mode (-S) and P6 output: Copyright (c) 2026 crunchyrollbot, MIT License (the same terms as this file).
+// One process serves many interpolation jobs: `JOB\t<t>\t<in0>\t<in1>\t<out>\n` per line on stdin, `done\t<out>\n`
+// on stdout after the file is closed, `QUIT\n` or EOF ends it; any failure is a reason on stderr and exit 1.
+
 #include <stdio.h>
+#include <string.h>
 #include <algorithm>
 #include <queue>
 #include <vector>
@@ -120,6 +125,7 @@ static void print_usage()
     fprintf(stderr, "  -f pattern-format    output image filename pattern format (%%08d.jpg/png/webp, default=ext/%%08d.png)\n");
     fprintf(stderr, "  -q                   webp image quality (0-100)\n");
     fprintf(stderr, "  -l                   list out available gpu devices\n");
+    fprintf(stderr, "  -S                   serve jobs from stdin (JOB/QUIT lines, .ppm output allowed)\n");
 }
 
 static int decode_image(const path_t& imagepath, ncnn::Mat& image, int* webp)
@@ -191,6 +197,23 @@ static int decode_image(const path_t& imagepath, ncnn::Mat& image, int* webp)
     return 0;
 }
 
+#if !_WIN32
+// Binary P6, the contiguous w*h*3 bytes of a 3-channel Mat; nonzero only when every byte reached the closed file.
+static int encode_ppm(const path_t& imagepath, const ncnn::Mat& image)
+{
+    if (image.elempack != 3)
+        return 0;
+    FILE* fp = fopen(imagepath.c_str(), "wb");
+    if (!fp)
+        return 0;
+    size_t bytes = (size_t)image.w * image.h * 3;
+    int ok = fprintf(fp, "P6\n%d %d\n255\n", image.w, image.h) > 0
+             && fwrite(image.data, 1, bytes, fp) == bytes;
+    ok = fclose(fp) == 0 && ok;
+    return ok;
+}
+#endif // !_WIN32
+
 static int encode_image(const path_t& imagepath, const ncnn::Mat& image, float quality = 100.0)
 {
     int success = 0;
@@ -201,6 +224,13 @@ static int encode_image(const path_t& imagepath, const ncnn::Mat& image, float q
     {
         success = webp_save(imagepath.c_str(), image.w, image.h, image.elempack, (const unsigned char*)image.data, quality);
     }
+#if !_WIN32
+    else if (ext == PATHSTR("ppm") || ext == PATHSTR("PPM"))
+    {
+        // Reachable from serve mode only: the single-shot output check rejects this extension earlier.
+        success = encode_ppm(imagepath, image);
+    }
+#endif
     else if (ext == PATHSTR("png") || ext == PATHSTR("PNG"))
     {
 #if _WIN32
@@ -439,6 +469,80 @@ void* save(void* args)
     return 0;
 }
 
+static void free_input(ncnn::Mat& image, int webp)
+{
+    unsigned char* pixeldata = (unsigned char*)image.data;
+    if (webp == 1)
+    {
+        free(pixeldata);
+    }
+    else
+    {
+#if _WIN32
+        free(pixeldata);
+#else
+        stbi_image_free(pixeldata);
+#endif
+    }
+}
+
+// -S: jobs from stdin, one at a time, the same `process` call the proc thread makes. The timestep text goes
+// through atof and a float conversion, exactly the `-s` path, so a served job and a single-shot run round t alike.
+static int serve(const RIFE* rife)
+{
+    char line[16384];
+    while (fgets(line, sizeof(line), stdin))
+    {
+        if (strncmp(line, "QUIT", 4) == 0)
+            return 0;
+        char tbuf[64], in0[4096], in1[4096], out[4096];
+        if (sscanf(line, "JOB\t%63[^\t]\t%4095[^\t]\t%4095[^\t]\t%4095[^\t\n]", tbuf, in0, in1, out) != 4)
+        {
+            fprintf(stderr, "serve: bad job line\n");
+            return 1;
+        }
+        float t = atof(tbuf);
+        if (t <= 0.f || t >= 1.f)
+        {
+            fprintf(stderr, "serve: timestep out of range\n");
+            return 1;
+        }
+        ncnn::Mat a, b;
+        int webp0 = 0, webp1 = 0;
+        if (decode_image(in0, a, &webp0) != 0)
+        {
+            fprintf(stderr, "serve: cannot decode %s\n", in0);
+            return 1;
+        }
+        if (decode_image(in1, b, &webp1) != 0)
+        {
+            free_input(a, webp0);
+            fprintf(stderr, "serve: cannot decode %s\n", in1);
+            return 1;
+        }
+        if (a.w != b.w || a.h != b.h)
+        {
+            free_input(a, webp0);
+            free_input(b, webp1);
+            fprintf(stderr, "serve: input sizes differ\n");
+            return 1;
+        }
+        ncnn::Mat o(a.w, a.h, (size_t)3, 3);
+        rife->process(a, b, t, o);
+        int ret = encode_image(out, o);
+        free_input(a, webp0);
+        free_input(b, webp1);
+        if (ret != 0)
+        {
+            fprintf(stderr, "serve: write failure %s\n", out);
+            return 1;
+        }
+        fprintf(stdout, "done\t%s\n", out);
+        fflush(stdout);
+    }
+    return 0;
+}
+
 
 #if _WIN32
 int wmain(int argc, wchar_t** argv)
@@ -463,14 +567,18 @@ int main(int argc, char** argv)
     int tta_temporal_mode = 0;
     int uhd_mode = 0;
     path_t pattern_format = PATHSTR("%08d.png");
+    int serve_mode = 0;
 
 #if _WIN32
     setlocale(LC_ALL, "");
     wchar_t opt;
-    while ((opt = getopt(argc, argv, L"0:1:i:o:n:s:m:g:j:f:q:vxzulh")) != (wchar_t)-1)
+    while ((opt = getopt(argc, argv, L"0:1:i:o:n:s:m:g:j:f:q:vxzulhS")) != (wchar_t)-1)
     {
         switch (opt)
         {
+        case L'S':
+            serve_mode = 1;
+            break;
         case L'0':
             input0path = optarg;
             break;
@@ -533,10 +641,13 @@ int main(int argc, char** argv)
     }
 #else // _WIN32
     int opt;
-    while ((opt = getopt(argc, argv, "0:1:i:o:n:s:m:g:j:f:q:vxzulh")) != -1)
+    while ((opt = getopt(argc, argv, "0:1:i:o:n:s:m:g:j:f:q:vxzulhS")) != -1)
     {
         switch (opt)
         {
+        case 'S':
+            serve_mode = 1;
+            break;
         case '0':
             input0path = optarg;
             break;
@@ -600,7 +711,7 @@ int main(int argc, char** argv)
     }
 #endif // _WIN32
 
-    if (((input0path.empty() || input1path.empty()) && inputpath.empty()) || outputpath.empty())
+    if (!serve_mode && ((((input0path.empty() || input1path.empty()) && inputpath.empty()) || outputpath.empty())))
     {
         print_usage();
         return -1;
@@ -653,7 +764,7 @@ int main(int argc, char** argv)
         pattern = PATHSTR("%08d");
     }
 
-    if (!path_is_directory(outputpath))
+    if (!serve_mode && !path_is_directory(outputpath))
     {
         // guess format from outputpath no matter what format argument specified
         path_t ext = get_file_extension(outputpath);
@@ -808,6 +919,10 @@ int main(int argc, char** argv)
                 timesteps[i] = fx;
             }
         }
+        else if (serve_mode)
+        {
+            // Jobs arrive on stdin; nothing to collect here.
+        }
         else if (inputpath.empty() && !path_is_directory(input0path) && !path_is_directory(input1path) && !path_is_directory(outputpath))
         {
             input0_files.push_back(input0path);
@@ -883,6 +998,17 @@ int main(int argc, char** argv)
             rife[i] = new RIFE(gpuid[i], tta_mode, tta_temporal_mode, uhd_mode, num_threads, rife_v2, rife_v4, padding);
 
             rife[i]->load(modeldir);
+        }
+
+        if (serve_mode)
+        {
+            int ret = serve(rife[0]);
+            for (int i=0; i<use_gpu_count; i++)
+            {
+                delete rife[i];
+            }
+            ncnn::destroy_gpu_instance();
+            return ret;
         }
 
         // main routine
