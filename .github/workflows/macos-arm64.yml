@@ -56,10 +56,11 @@ jobs:
           cmake --version
           xcrun --show-sdk-version
           printf 'Runner image: %s %s\n' "$ImageOS" "$ImageVersion"
-          git submodule status --recursive
-          git submodule status --recursive | grep -q " $NCNN_PIN src/ncnn "
-          git submodule status --recursive | grep -q " $LIBWEBP_PIN src/libwebp "
-          git submodule status --recursive | grep -q " $GLSLANG_PIN src/ncnn/glslang "
+          git submodule status --recursive > submodules.txt
+          cat submodules.txt
+          grep -q " $NCNN_PIN src/ncnn " submodules.txt
+          grep -q " $LIBWEBP_PIN src/libwebp " submodules.txt
+          grep -q " $GLSLANG_PIN src/ncnn/glslang " submodules.txt
           git merge-base --is-ancestor "$UPSTREAM_SOURCE" HEAD
           shasum -a 256 -c <<< "$MODEL_BIN_SHA256  models/rife-v4.26/flownet.bin"
           shasum -a 256 -c <<< "$MODEL_PARAM_SHA256  models/rife-v4.26/flownet.param"
