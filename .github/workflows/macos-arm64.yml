@@ -1,0 +1,164 @@
+name: macOS arm64 serve-mode build
+
+# Builds the thin arm64 rife-ncnn-vulkan of this branch on an Apple-silicon runner from the same pinned inputs as
+# upstream's release.yml (Vulkan SDK 1.2.162.0 dmg from the TNTwise mirror, OpenMP 11.0.0 from llvm-project, the
+# pinned submodules) and uploads one zip as a workflow artifact. It never publishes a release: the owner inspects the
+# artifact and publishes it by hand, so `contents: read` is all this workflow needs.
+
+on:
+  push:
+    branches: [serve-mode]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SDK_URL: https://github.com/TNTwise/Rife-Vulkan-Models/releases/download/1/vulkansdk-macos-1.2.162.0.dmg
+  SDK_SHA256: d5d25d801eb83130db1e41fa6c09f125ba57e7503ae81553182ba7196f32a0a3
+  SDK_BYTES: "317464227"
+  OMP_URL: https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.0/openmp-11.0.0.src.tar.xz
+  OMP_SHA256: 2d704df8ca67b77d6d94ebf79621b0f773d5648963dd19e0f78efef4404b684c
+  UPSTREAM_SOURCE: 5eea93c6e7079dda69d7a0ce9c1106ff5e641143
+  UPSTREAM_RELEASE: "20250112"
+  NCNN_PIN: b4ba207c18d3103d6df890c0e3a97b469b196b26
+  LIBWEBP_PIN: 5abb55823bb6196a918dd87202b2f32bbaff4c18
+  GLSLANG_PIN: 86ff4bca1ddc7e2262f119c16e7228d0efb67610
+  MODEL_BIN_SHA256: 94d58e30b75d7c7609cfa6f3bdad524deddd14f5f75e85c36d2f827ef5c64731
+  MODEL_PARAM_SHA256: 79f16c28903f93f8308f0c4c947f8c7e0c17d99a57b85473e5f298dd578d137b
+  LICENSE_SHA256: a73beab18143600af0b10c6050a953ec233775ce31c2bf3373a794db535329fd
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record the toolchain and assert the pinned inputs
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcodebuild -version
+          clang --version
+          cmake --version
+          xcrun --show-sdk-version
+          printf 'Runner image: %s %s\n' "$ImageOS" "$ImageVersion"
+          git submodule status --recursive
+          git submodule status --recursive | grep -q " $NCNN_PIN src/ncnn "
+          git submodule status --recursive | grep -q " $LIBWEBP_PIN src/libwebp "
+          git submodule status --recursive | grep -q " $GLSLANG_PIN src/ncnn/glslang "
+          git merge-base --is-ancestor "$UPSTREAM_SOURCE" HEAD
+          shasum -a 256 -c <<< "$MODEL_BIN_SHA256  models/rife-v4.26/flownet.bin"
+          shasum -a 256 -c <<< "$MODEL_PARAM_SHA256  models/rife-v4.26/flownet.param"
+          shasum -a 256 -c <<< "$LICENSE_SHA256  LICENSE"
+
+      - name: Vulkan SDK 1.2.162.0 (MoltenVK 1.1.1 static)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o vulkansdk.dmg "$SDK_URL"
+          test "$(stat -f %z vulkansdk.dmg)" = "$SDK_BYTES"
+          shasum -a 256 -c <<< "$SDK_SHA256  vulkansdk.dmg"
+          mkdir -p sdkmount vulkansdk
+          hdiutil attach -nobrowse -readonly -mountpoint "$PWD/sdkmount" vulkansdk.dmg
+          cp -R sdkmount/MoltenVK vulkansdk/MoltenVK
+          hdiutil detach "$PWD/sdkmount"
+          rm -f vulkansdk.dmg
+          shasum -a 256 vulkansdk/MoltenVK/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a | tee moltenvk.sha256
+
+      - name: OpenMP 11.0.0 static (arm64)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o openmp-11.0.0.src.tar.xz "$OMP_URL"
+          shasum -a 256 -c <<< "$OMP_SHA256  openmp-11.0.0.src.tar.xz"
+          tar -xf openmp-11.0.0.src.tar.xz
+          # upstream release.yml lines 93-94
+          sed -i'' -e '/.size __kmp_unnamed_critical_addr/d' openmp-11.0.0.src/runtime/src/z_Linux_asm.S
+          sed -i'' -e 's/__kmp_unnamed_critical_addr/___kmp_unnamed_critical_addr/g' openmp-11.0.0.src/runtime/src/z_Linux_asm.S
+          cmake -S openmp-11.0.0.src -B omp-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/omp" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DLIBOMP_ENABLE_SHARED=OFF -DLIBOMP_OMPT_SUPPORT=OFF -DLIBOMP_USE_HWLOC=OFF
+          cmake --build omp-build -j "$(sysctl -n hw.ncpu)"
+          cmake --build omp-build --target install
+          test -f omp/lib/libomp.a
+
+      - name: Build rife-ncnn-vulkan (arm64, static MoltenVK)
+        run: |
+          set -euo pipefail
+          OMP="$PWD/omp"; SDK="$PWD/vulkansdk"
+          CMAKE_LINE="cmake -S src -B build-arm64 -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DOpenMP_C_FLAGS=\"-Xclang -fopenmp -I$OMP/include\" -DOpenMP_CXX_FLAGS=\"-Xclang -fopenmp -I$OMP/include\" \
+            -DOpenMP_C_LIB_NAMES=libomp -DOpenMP_CXX_LIB_NAMES=libomp -DOpenMP_libomp_LIBRARY=$OMP/lib/libomp.a \
+            -DVulkan_INCLUDE_DIR=$SDK/MoltenVK/include \
+            -DVulkan_LIBRARY=$SDK/MoltenVK/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a"
+          printf '%s\n' "$CMAKE_LINE" > cmake-line.txt
+          cmake -S src -B build-arm64 -DUSE_STATIC_MOLTENVK=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DOpenMP_C_FLAGS="-Xclang -fopenmp -I$OMP/include" -DOpenMP_CXX_FLAGS="-Xclang -fopenmp -I$OMP/include" \
+            -DOpenMP_C_LIB_NAMES=libomp -DOpenMP_CXX_LIB_NAMES=libomp -DOpenMP_libomp_LIBRARY="$OMP/lib/libomp.a" \
+            -DVulkan_INCLUDE_DIR="$SDK/MoltenVK/include" \
+            -DVulkan_LIBRARY="$SDK/MoltenVK/MoltenVK.xcframework/macos-arm64_x86_64/libMoltenVK.a"
+          cmake --build build-arm64 -j "$(sysctl -n hw.ncpu)"
+          strip build-arm64/rife-ncnn-vulkan
+          test "$(lipo -archs build-arm64/rife-ncnn-vulkan)" = arm64
+          file build-arm64/rife-ncnn-vulkan
+          otool -L build-arm64/rife-ncnn-vulkan
+          ./build-arm64/rife-ncnn-vulkan -h 2>&1 | grep -q -- '-S '
+
+      - name: Stage, record provenance, zip, print every SHA-256
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/rife-v4.26
+          cp build-arm64/rife-ncnn-vulkan out/rife-ncnn-vulkan
+          cp models/rife-v4.26/flownet.bin models/rife-v4.26/flownet.param out/rife-v4.26/
+          cp LICENSE out/LICENSE
+          python3 - "$RUN_URL" <<'PY'
+          import hashlib, json, os, pathlib, subprocess, sys
+          def sha(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+          def run(*a): return subprocess.run(a, capture_output=True, text=True, check=True).stdout.strip()
+          env = os.environ
+          build = {
+              "forkRepository": env["GITHUB_REPOSITORY"], "forkSource": env["GITHUB_SHA"], "forkRef": env["GITHUB_REF_NAME"],
+              "upstreamRelease": env["UPSTREAM_RELEASE"], "upstreamSource": env["UPSTREAM_SOURCE"],
+              "submodules": {"src/ncnn": env["NCNN_PIN"], "src/libwebp": env["LIBWEBP_PIN"], "src/ncnn/glslang": env["GLSLANG_PIN"]},
+              "sdkDmg": {"url": env["SDK_URL"], "bytes": int(env["SDK_BYTES"]), "sha256": env["SDK_SHA256"]},
+              "moltenVKStaticSHA256": pathlib.Path("moltenvk.sha256").read_text().split()[0],
+              "openmp": {"url": env["OMP_URL"], "sha256": env["OMP_SHA256"]},
+              "cmakeCommand": pathlib.Path("cmake-line.txt").read_text().strip(),
+              "toolchain": {"cmake": run("cmake", "--version").splitlines()[0], "xcodebuild": run("xcodebuild", "-version").replace("\n", " "),
+                            "clang": run("clang", "--version").splitlines()[0], "sdk": run("xcrun", "--show-sdk-version"),
+                            "image": f'{env.get("ImageOS", "")} {env.get("ImageVersion", "")}'.strip()},
+              "stripped": True, "runURL": sys.argv[1],
+              "binary": {"bytes": pathlib.Path("out/rife-ncnn-vulkan").stat().st_size, "sha256": sha("out/rife-ncnn-vulkan"),
+                         "archs": run("lipo", "-archs", "out/rife-ncnn-vulkan"), "otool": run("otool", "-L", "out/rife-ncnn-vulkan").splitlines()[1:]},
+              "models": {"rife-v4.26/flownet.bin": sha("out/rife-v4.26/flownet.bin"), "rife-v4.26/flownet.param": sha("out/rife-v4.26/flownet.param")},
+              "licenseSHA256": sha("out/LICENSE"),
+          }
+          pathlib.Path("out/rife-build.json").write_text(json.dumps(build, indent=2) + "\n")
+          print(json.dumps(build, indent=2))
+          PY
+          (cd out && zip -X -r ../rife-ncnn-vulkan-macos-arm64.zip rife-ncnn-vulkan rife-v4.26 LICENSE rife-build.json)
+          unzip -l rife-ncnn-vulkan-macos-arm64.zip
+          echo "== SHA-256 =="
+          shasum -a 256 rife-ncnn-vulkan-macos-arm64.zip out/rife-ncnn-vulkan out/rife-v4.26/flownet.bin out/rife-v4.26/flownet.param out/LICENSE out/rife-build.json
+          stat -f '%z %N' rife-ncnn-vulkan-macos-arm64.zip out/rife-ncnn-vulkan out/rife-build.json
+
+      - name: Upload the zip as an artifact (no release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rife-ncnn-vulkan-macos-arm64
+          path: rife-ncnn-vulkan-macos-arm64.zip
+          if-no-files-found: error
+          retention-days: 30
