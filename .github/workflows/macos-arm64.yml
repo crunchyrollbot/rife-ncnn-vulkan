@@ -116,7 +116,8 @@ jobs:
           test "$(lipo -archs build-arm64/rife-ncnn-vulkan)" = arm64
           file build-arm64/rife-ncnn-vulkan
           otool -L build-arm64/rife-ncnn-vulkan
-          ./build-arm64/rife-ncnn-vulkan -h 2>&1 | grep -q -- '-S '
+          usage="$(./build-arm64/rife-ncnn-vulkan -h 2>&1 || true)"   # -h prints the usage and exits 255
+          grep -q -- '-S ' <<< "$usage"
 
       - name: Stage, record provenance, zip, print every SHA-256
         env:
