@@ -1,6 +1,8 @@
 name: release
 
-on: [push, pull_request, workflow_dispatch]
+# This fork: manual only. Its runners (ubuntu-20.04, macos-13) are retired and it would create a release on a tag
+# push; macos-arm64.yml is the build that matters here and it never publishes.
+on: [workflow_dispatch]
     
 env: 
   DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
